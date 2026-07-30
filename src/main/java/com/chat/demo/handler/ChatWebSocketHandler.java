@@ -1,346 +1,189 @@
 package com.chat.demo.handler;
 
 import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONObject;
+import com.chat.demo.dao.ChatMessage;
+import com.chat.demo.dao.Connect;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.web.util.UriComponents;
+import org.springframework.web.util.UriComponentsBuilder;
 
-import java.util.Arrays;
-import java.util.Set;
+import java.io.IOException;
+import java.net.URI;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 
+@Slf4j
 public class ChatWebSocketHandler extends TextWebSocketHandler {
-
-    // ===================== 数据存储 =====================
-
-    /**
-     * 用户连接池：userId → WebSocketSession
-     */
-    private static final ConcurrentHashMap<String, WebSocketSession> USER_SESSION_MAP = new ConcurrentHashMap<>();
-
-    /**
-     * 房间管理：roomId → 该房间内所有用户的ID集合
-     */
-    private static final ConcurrentHashMap<String, Set<String>> ROOMS = new ConcurrentHashMap<>();
-
-    /**
-     * 反向映射：sessionId → userId（用于 O(1) 查找）
-     */
-    private static final ConcurrentHashMap<String, String> SESSION_USER_MAP = new ConcurrentHashMap<>();
-
-    // ===================== WebSocket 生命周期 =====================
+    public static final ConcurrentHashMap<String, WebSocketSession> USER_ID_SESSION = new ConcurrentHashMap<>();
+    public static final ConcurrentHashMap<String, Set<String>> ROOM_LIST = new ConcurrentHashMap<>();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
-        String userId = extractUserId(session);
-        USER_SESSION_MAP.put(userId, session);
-        SESSION_USER_MAP.put(session.getId(), userId);
-        broadcastSystemMessage("【系统】" + userId + " 上线了");
+        URI uri = session.getUri();
+        UriComponents uriComponents = UriComponentsBuilder.fromUri(uri).build();
+        MultiValueMap<String, String> queryParams = uriComponents.getQueryParams();
+        Map<String, String> paramMap = new HashMap<>();
+        queryParams.forEach((key, values) -> {
+            if (values != null && !values.isEmpty()) {
+                paramMap.put(key, values.get(0));
+            }
+        });
+        ObjectMapper mapper = new ObjectMapper();
+        Connect connect = mapper.convertValue(paramMap, Connect.class);
+        String userId = connect.getUserId();
+        if (userId != null && !userId.isEmpty()) {
+            USER_ID_SESSION.put(userId, session);
+        } else {
+            USER_ID_SESSION.put(session.getId(), session);
+        }
+        log.info("用户 " + userId + "上线了", userId);
     }
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         String payload = message.getPayload();
-        // 处理心跳
-        if ("ping".equals(payload)) {
-            session.sendMessage(new TextMessage("pong"));
-            return;
-        }
-
-        JSONObject json;
-        try {
-            json = JSON.parseObject(payload);
-        } catch (Exception e) {
-            broadcastSystemMessage("【广播】" + payload);
-            return;
-        }
-
-        String type = json.getString("type");
-        String fromUserId = json.getString("fromUserId");
-
-        if (fromUserId == null || fromUserId.isEmpty()) {
-            sendError(session, "缺少 fromUserId");
-            return;
-        }
-
-        // ========== 根据类型分发 ==========
-        if ("private".equals(type)) {
-            handlePrivateMessage(session, json, fromUserId);
-        } else if ("group".equals(type)) {
-            handleGroupMessage(session, json, fromUserId);
-        } else if ("join".equals(type)) {
-            handleJoinRoom(session, json, fromUserId);
-        } else if ("leave".equals(type)) {
-            handleLeaveRoom(session, json, fromUserId);
-        } else {
-            String content = json.getString("content");
-            if (content != null) {
-                broadcastSystemMessage("【广播】" + fromUserId + "：" + content);
-            } else {
-                sendError(session, "未知的消息类型");
-            }
-        }
-    }
-
-    @Override
-    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
-        String userId = SESSION_USER_MAP.remove(session.getId());
-        if (userId != null) {
-            USER_SESSION_MAP.remove(userId);
-            System.out.println("❌ 用户 " + userId + " 下线，当前在线人数：" + USER_SESSION_MAP.size());
-
-            for (Set<String> members : ROOMS.values()) {
-                members.remove(userId);
-            }
-            ROOMS.entrySet().removeIf(entry -> entry.getValue().isEmpty());
-
-            broadcastSystemMessage("【系统】" + userId + " 下线了");
+        ChatMessage chatMessage = JSON.parseObject(payload, ChatMessage.class);
+        String type = chatMessage.getType();
+        switch (type) {
+            case "ping":
+                session.sendMessage(new TextMessage("pong"));
+                break;
+            case "private":
+                log.info("私聊");
+                createPrivateRoom(chatMessage.getFromUserId(), chatMessage.getToUserId(), chatMessage);
+                break;
+            case "group":
+                createGroupRoom(chatMessage.getFromUserId(), chatMessage);
+                log.info("群聊");
+                break;
+            case "leave":
+                handleLeaveRoom(session, chatMessage.getFromUserId(), chatMessage);
+                log.info("离开");
+                break;
+            case "join":
+                handleJoinRoom(session, chatMessage.getFromUserId(), chatMessage);
+                log.info("加入");
+                break;
+            default:
+                log.info("未知消息");
         }
     }
 
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) throws Exception {
-        System.err.println("⚠️ 传输异常：" + exception.getMessage());
+        log.error("传输异常：{}", exception.getMessage());
         if (session.isOpen()) {
             session.close(CloseStatus.SERVER_ERROR);
         }
     }
 
-    // ===================== 消息处理器 =====================
-
-    /**
-     * 私聊：自动创建两人房间
-     */
-    private void handlePrivateMessage(WebSocketSession session, JSONObject json, String fromUserId) throws Exception {
-        String toUserId = json.getString("toUserId");
-        String content = json.getString("content");
-
-        if (toUserId == null || toUserId.isEmpty()) {
-            sendError(session, "私聊缺少 toUserId");
-            return;
-        }
-        if (content == null || content.isEmpty()) {
-            sendError(session, "消息内容不能为空");
-            return;
-        }
-
-        // 生成顺序无关的房间ID
-        String roomId = getPrivateRoomId(fromUserId, toUserId);
-
-        // 自动创建/加入房间
-        Set<String> members = ROOMS.computeIfAbsent(roomId, k -> new CopyOnWriteArraySet<>());
-        members.add(fromUserId);
-        members.add(toUserId);
-
-        // 检查目标是否在线
-        WebSocketSession targetSession = USER_SESSION_MAP.get(toUserId);
-        if (targetSession != null && targetSession.isOpen()) {
-            JSONObject response = new JSONObject();
-            response.put("type", "private");
-            response.put("roomId", roomId);
-            response.put("fromUserId", fromUserId);
-            response.put("content", content);
-            response.put("timestamp", System.currentTimeMillis());
-
-            TextMessage textMsg = new TextMessage(response.toJSONString());
-            for (String memberId : members) {
-                if (memberId.equals(fromUserId)) continue;
-                WebSocketSession memberSession = USER_SESSION_MAP.get(memberId);
-                if (memberSession != null && memberSession.isOpen()) {
-                    memberSession.sendMessage(textMsg);
-                }
-            }
-        } else {
-            JSONObject error = new JSONObject();
-            error.put("type", "error");
-            error.put("msg", "用户 " + toUserId + " 不在线");
-            session.sendMessage(new TextMessage(error.toJSONString()));
-        }
-    }
-
-    /**
-     * 群聊
-     */
-    private void handleGroupMessage(WebSocketSession session, JSONObject json, String fromUserId) throws Exception {
-        String roomId = json.getString("roomId");
-        String content = json.getString("content");
-
-        if (roomId == null || roomId.isEmpty()) {
-            sendError(session, "群聊缺少 roomId");
-            return;
-        }
-        if (content == null || content.isEmpty()) {
-            sendError(session, "消息内容不能为空");
-            return;
-        }
-
-        Set<String> members = ROOMS.get(roomId);
-        if (members == null || members.isEmpty()) {
-            sendError(session, "房间 " + roomId + " 不存在或为空");
-            return;
-        }
-
-        JSONObject response = new JSONObject();
-        response.put("type", "group");
-        response.put("roomId", roomId);
-        response.put("fromUserId", fromUserId);
-        response.put("content", content);
-        response.put("timestamp", System.currentTimeMillis());
-
-        TextMessage textMsg = new TextMessage(response.toJSONString());
-        for (String memberId : members) {
-            if (memberId.equals(fromUserId)) continue;
-            WebSocketSession memberSession = USER_SESSION_MAP.get(memberId);
-            if (memberSession != null && memberSession.isOpen()) {
-                memberSession.sendMessage(textMsg);
+    @Override
+    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
+        String userId = null;
+        for (Map.Entry<String, WebSocketSession> entry : USER_ID_SESSION.entrySet()) {
+            if (entry.getValue().equals(session)) {
+                userId = entry.getKey();
+                break;
             }
         }
-        System.out.println("📢 群聊 [" + roomId + "]：" + fromUserId + "：" + content);
-    }
-
-    /**
-     * 加入房间
-     */
-    private void handleJoinRoom(WebSocketSession session, JSONObject json, String fromUserId) throws Exception {
-        String roomId = json.getString("roomId");
-        if (roomId == null || roomId.isEmpty()) {
-            sendError(session, "加入房间缺少 roomId");
-            return;
-        }
-
-        Set<String> members = ROOMS.computeIfAbsent(roomId, k -> new CopyOnWriteArraySet<>());
-        boolean added = members.add(fromUserId);
-
-        if (added) {
-            System.out.println("🚪 " + fromUserId + " 加入房间：" + roomId + "，当前人数：" + members.size());
-            JSONObject response = new JSONObject();
-            response.put("type", "system");
-            response.put("msg", "你已加入房间 " + roomId);
-            session.sendMessage(new TextMessage(response.toJSONString()));
-            roomBroadcast(roomId, "【系统】" + fromUserId + " 加入了房间", fromUserId);
-        } else {
-            sendError(session, "你已在房间 " + roomId + " 中");
-        }
-    }
-
-    /**
-     * 退出房间
-     */
-    private void handleLeaveRoom(WebSocketSession session, JSONObject json, String fromUserId) throws Exception {
-        String roomId = json.getString("roomId");
-        if (roomId == null || roomId.isEmpty()) {
-            sendError(session, "退出房间缺少 roomId");
-            return;
-        }
-
-        Set<String> members = ROOMS.get(roomId);
-        if (members == null) {
-            sendError(session, "房间 " + roomId + " 不存在");
-            return;
-        }
-
-        boolean removed = members.remove(fromUserId);
-        if (removed) {
-            System.out.println("🚪 " + fromUserId + " 退出房间：" + roomId);
-            JSONObject response = new JSONObject();
-            response.put("type", "system");
-            response.put("msg", "你已退出房间 " + roomId);
-            session.sendMessage(new TextMessage(response.toJSONString()));
-            roomBroadcast(roomId, "【系统】" + fromUserId + " 退出了房间", fromUserId);
-            if (members.isEmpty()) {
-                ROOMS.remove(roomId);
+        if (userId != null) {
+            USER_ID_SESSION.remove(userId);
+            log.info("用户 {} 已下线", userId);
+            for (Set<String> members : ROOM_LIST.values()) {
+                members.remove(userId);
             }
-        } else {
-            sendError(session, "你不在房间 " + roomId + " 中");
+            ROOM_LIST.entrySet().removeIf(entry -> entry.getValue().isEmpty());
         }
     }
 
-    // ===================== 辅助方法 =====================
-
     /**
-     * 生成私聊房间 ID（顺序无关）
+     * 私聊创建2人房间
      */
-    private String getPrivateRoomId(String user1, String user2) {
-        String[] users = {user1, user2};
-        Arrays.sort(users);
-        return "private_" + users[0] + "_" + users[1];
+    private void createPrivateRoom(String fromUserId, String toUserId, ChatMessage chatMessage) throws IOException {
+        WebSocketSession fromSession = USER_ID_SESSION.get(fromUserId);
+        WebSocketSession toUserSession = USER_ID_SESSION.get(toUserId);
+        String[] array = {fromUserId, toUserId};
+        Arrays.sort(array);
+        String roomId = "roomId_private_" + array[0] + "_" + array[1];
+        HashSet<String> SetArray = new HashSet<>();
+        SetArray.add(fromUserId);
+        SetArray.add(toUserId);
+        log.info("创建房间 " + roomId);
+        ROOM_LIST.put(roomId, SetArray);
+        //判断对方是否在线
+        if (toUserSession != null && toUserSession.isOpen()) {
+            chatMessage.setCreateTime(new Date());
+            toUserSession.sendMessage(new TextMessage(JSON.toJSONString(chatMessage)));
+        } else {
+            fromSession.sendMessage(new TextMessage("用户 " + toUserId + " 不在线,请稍后重试"));
+        }
     }
 
     /**
-     * 房间内广播
+     * 群聊多人房间发送消息
      */
-    private void roomBroadcast(String roomId, String msg, String excludeUserId) {
-        Set<String> members = ROOMS.get(roomId);
-        if (members == null) return;
-        TextMessage textMsg = new TextMessage(msg);
-        for (String memberId : members) {
-            if (memberId.equals(excludeUserId)) continue;
-            WebSocketSession session = USER_SESSION_MAP.get(memberId);
+    private void createGroupRoom(String fromUserId, ChatMessage chatMessage) throws IOException {
+        String roomId = chatMessage.getRoomId();
+        if (roomId == null || roomId.isEmpty()) {
+            USER_ID_SESSION.get(fromUserId).sendMessage(new TextMessage("群聊不存在"));
+            return;
+        }
+        for (String userId : ROOM_LIST.get(roomId)) {
+            WebSocketSession session = USER_ID_SESSION.get(userId);
             if (session != null && session.isOpen()) {
                 try {
-                    session.sendMessage(textMsg);
-                } catch (Exception e) {
-                    System.err.println("房间广播失败：" + e.getMessage());
+                    session.sendMessage(new TextMessage(JSON.toJSONString(chatMessage)));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
                 }
+            } else {
+                log.info("用户 " + userId + " 不在线,请稍后重试");
             }
+            ;
         }
     }
 
     /**
-     * 全局广播
+     * 加入群聊房间
      */
-    private void broadcastSystemMessage(String msg) {
-        TextMessage textMsg = new TextMessage(msg);
-        for (WebSocketSession session : USER_SESSION_MAP.values()) {
-            try {
-                if (session.isOpen()) {
-                    session.sendMessage(textMsg);
-                }
-            } catch (Exception e) {
-                System.err.println("系统广播失败：" + e.getMessage());
-            }
+    private void handleJoinRoom(WebSocketSession session, String fromUserId, ChatMessage chatMessage) throws Exception {
+        String roomId = chatMessage.getRoomId();
+        if (roomId == null || roomId.isEmpty()) {
+            session.sendMessage(new TextMessage("群聊id为空"));
+            return;
+        }
+        //ConcurrentHashMap 的一个原子性方法，意思是：“如果指定的 key（房间号）不存在，就执行后面的函数创建一个新值，并存入 Map；如果已经存在，就直接返回旧值”
+        Set<String> strings = ROOM_LIST.computeIfAbsent(roomId, k -> new CopyOnWriteArraySet<>());
+        boolean add = strings.add(fromUserId);
+        if (add) {
+            session.sendMessage(new TextMessage("加入群聊成功"));
+        } else {
+            session.sendMessage(new TextMessage("你已在群聊内"));
         }
     }
 
     /**
-     * 发送错误
+     * 退出群聊
      */
-    private void sendError(WebSocketSession session, String msg) throws Exception {
-        JSONObject error = new JSONObject();
-        error.put("type", "error");
-        error.put("msg", msg);
-        session.sendMessage(new TextMessage(error.toJSONString()));
-    }
-
-    /**
-     * 提取 userId
-     */
-    private String extractUserId(WebSocketSession session) {
-        String query = session.getUri().getQuery();
-        if (query != null && query.startsWith("userId=")) {
-            return query.substring(7);
+    private void handleLeaveRoom(WebSocketSession session, String fromUserId, ChatMessage chatMessage) throws Exception {
+        String roomId = chatMessage.getRoomId();
+        if (roomId == null || roomId.isEmpty()) {
+            session.sendMessage(new TextMessage("群聊id为空"));
+            return;
         }
-        return session.getId();
-    }
-
-    // ===================== 对外接口 =====================
-
-    public static ConcurrentHashMap<String, WebSocketSession> getUserSessionMap() {
-        return new ConcurrentHashMap<>(USER_SESSION_MAP);
-    }
-
-    public static ConcurrentHashMap<String, Set<String>> getRooms() {
-        return new ConcurrentHashMap<>(ROOMS);
-    }
-
-    public static int getOnlineCount() {
-        return USER_SESSION_MAP.size();
-    }
-
-    public static int getRoomCount() {
-        return ROOMS.size();
+        Set<String> strings = ROOM_LIST.get(roomId);
+        boolean remove = strings.remove(fromUserId);
+        if (remove) {
+            session.sendMessage(new TextMessage("退出群聊成功"));
+        } else {
+            session.sendMessage(new TextMessage("你已退出群聊"));
+        }
     }
 }
