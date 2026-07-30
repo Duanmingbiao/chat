@@ -139,6 +139,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
         for (String userId : ROOM_LIST.get(roomId)) {
             WebSocketSession session = USER_ID_SESSION.get(userId);
+            if(userId.equals(fromUserId)){
+                continue;
+            }
             if (session != null && session.isOpen()) {
                 try {
                     session.sendMessage(new TextMessage(JSON.toJSONString(chatMessage)));
