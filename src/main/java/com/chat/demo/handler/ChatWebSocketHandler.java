@@ -116,7 +116,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         SetArray.add(fromUserId);
         SetArray.add(toUserId);
         log.info("创建房间 " + roomId);
-        ROOM_LIST.put(roomId, SetArray);
+        if(!ROOM_LIST.containsKey(roomId)){
+            ROOM_LIST.put(roomId, SetArray);
+        }
         //判断对方是否在线
         if (toUserSession != null && toUserSession.isOpen()) {
             chatMessage.setCreateTime(new Date());
