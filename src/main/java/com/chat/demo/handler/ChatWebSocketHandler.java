@@ -117,7 +117,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      */
     private void createGroupRoom(String fromUserId,String roomId ,ChatMessage chatMessage) throws IOException {
         if (roomId == null || roomId.isEmpty()) {
-            USER_ID_SESSION.get(fromUserId).sendMessage(new TextMessage("群聊不存在"));
+            USER_ID_SESSION.get(fromUserId).sendMessage(new TextMessage("当前聊天不存在"));
             return;
         }
         for (String userId : ROOM_LIST.get(roomId)) {
@@ -132,7 +132,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     throw new RuntimeException(e);
                 }
             } else {
-                log.info("用户 " + userId + " 不在线,请稍后重试");
+                USER_ID_SESSION.get(fromUserId).sendMessage(new TextMessage("用户 " + userId + " 不在线,请稍后重试"));
             }
             ;
         }
