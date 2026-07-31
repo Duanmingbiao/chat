@@ -94,12 +94,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             }
         }
         if (userId != null) {
-            USER_ID_SESSION.remove(userId);
             log.info("用户 {} 已下线", userId);
-            for (Set<String> members : ROOM_LIST.values()) {
-                members.remove(userId);
-            }
-            ROOM_LIST.entrySet().removeIf(entry -> entry.getValue().isEmpty());
         }
     }
 
