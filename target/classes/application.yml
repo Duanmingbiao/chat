@@ -1,3 +1,12 @@
-# 应用服务 WEB 访问端口
-server.port=8080
-
+spring:
+  redis:
+    host: localhost  # Redis服务器地址
+    port: 6379       # Redis端口
+    password: 123456       # Redis密码（没有就留空）
+    database: 0      # 使用的数据库索引
+    timeout: 5000ms  # 连接超时时间
+    lettuce:
+      pool:
+        max-active: 8   # 最大连接数
+        max-idle: 8     # 最大空闲连接
+        min-idle: 0     # 最小空闲连接

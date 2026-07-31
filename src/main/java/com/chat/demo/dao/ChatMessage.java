@@ -14,4 +14,5 @@ public class ChatMessage {
     private String content;
     @JSONField(format = "yyyy-MM-dd HH:mm:ss")
     private Date createTime;
+    private Boolean IsOffline;
 }

@@ -10,11 +10,17 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 @Configuration
 @EnableWebSocket
 public class WebSocketConfig implements WebSocketConfigurer {
+    private final ChatWebSocketHandler chatWebSocketHandler;
+
+    public WebSocketConfig(ChatWebSocketHandler chatWebSocketHandler) {
+        this.chatWebSocketHandler = chatWebSocketHandler;
+    }
+
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         // 注册 WebSocket 处理器，访问路径为 /chat
         // setAllowedOrigins("*") 允许所有来源跨域访问（开发环境方便调试）
-        registry.addHandler(new ChatWebSocketHandler(), "/chat")
+        registry.addHandler(chatWebSocketHandler, "/chat")
                 .setAllowedOrigins("*");
     }
 }
