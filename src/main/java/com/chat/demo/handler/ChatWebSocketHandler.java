@@ -60,7 +60,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                 createPrivateRoom(chatMessage.getFromUserId(), chatMessage.getToUserId(), chatMessage);
                 break;
             case "group":
-                createGroupRoom(chatMessage.getFromUserId(), chatMessage);
+                createGroupRoom(chatMessage.getFromUserId(),chatMessage.getRoomId(), chatMessage);
                 log.info("群聊");
                 break;
             case "leave":
@@ -107,32 +107,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      * 私聊创建2人房间
      */
     private void createPrivateRoom(String fromUserId, String toUserId, ChatMessage chatMessage) throws IOException {
-        WebSocketSession fromSession = USER_ID_SESSION.get(fromUserId);
-        WebSocketSession toUserSession = USER_ID_SESSION.get(toUserId);
         String[] array = {fromUserId, toUserId};
         Arrays.sort(array);
         String roomId = "roomId_private_" + array[0] + "_" + array[1];
         HashSet<String> SetArray = new HashSet<>();
         SetArray.add(fromUserId);
         SetArray.add(toUserId);
-        log.info("创建房间 " + roomId);
-        if(!ROOM_LIST.containsKey(roomId)){
-            ROOM_LIST.put(roomId, SetArray);
-        }
-        //判断对方是否在线
-        if (toUserSession != null && toUserSession.isOpen()) {
-            chatMessage.setCreateTime(new Date());
-            toUserSession.sendMessage(new TextMessage(JSON.toJSONString(chatMessage)));
-        } else {
-            fromSession.sendMessage(new TextMessage("用户 " + toUserId + " 不在线,请稍后重试"));
-        }
+        ROOM_LIST.put(roomId, SetArray);
+        createGroupRoom(fromUserId, roomId, chatMessage);
     }
 
     /**
      * 群聊多人房间发送消息
      */
-    private void createGroupRoom(String fromUserId, ChatMessage chatMessage) throws IOException {
-        String roomId = chatMessage.getRoomId();
+    private void createGroupRoom(String fromUserId,String roomId ,ChatMessage chatMessage) throws IOException {
         if (roomId == null || roomId.isEmpty()) {
             USER_ID_SESSION.get(fromUserId).sendMessage(new TextMessage("群聊不存在"));
             return;
